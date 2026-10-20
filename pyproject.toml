@@ -1,0 +1,48 @@
+[project]
+name = "mcp-client"
+version = "0.1.0"
+description = "Mauritian news archive with an MCP server, a REST API and a Gemini-powered chat client"
+readme = "Readme.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.151.0",
+    "google-genai>=2.31.0",
+    # news_store.py fetches the RSS feeds with httpx2.
+    "httpx2>=2.15.1",
+    "mcp>=2.3.0",
+    # client.py imports TextContent from mcp_types, which `mcp` pins exactly.
+    "mcp-types>=2.2.0",
+    "python-dotenv>=1.2.4",
+    "uvicorn>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["Readme.md"]
+
+[tool.ruff.lint]
+select = [
+    "C4",   # flake8-comprehensions
+    "C90",  # mccabe
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # isort
+    "PERF", # Perflint
+    "PL",   # Pylint
+    "UP",   # pyupgrade
+]
+ignore = ["PERF203", "PLC0415", "PLR0402"]
+mccabe.max-complexity = 24 # Default is 10
+
+[tool.ruff.lint.pylint]
+allow-magic-value-types = ["bytes", "float", "int", "str"]
+max-args = 23                                              # Default is 5
+max-branches = 23                                          # Default is 12
+max-returns = 13                                           # Default is 6
+max-statements = 102                                       # Default is 50

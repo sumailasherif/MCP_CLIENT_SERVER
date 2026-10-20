@@ -1,0 +1,15 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+
+# Secrets: the real API key lives here; .env.example is the committed template
+.env
+
+# The news archive is data, rebuilt from the feeds with `python news_server.py --refresh`.
+# Its structure is versioned in schema.sql.
+news.db
+news.db-journal
+news.db-wal
+news.db-shm
