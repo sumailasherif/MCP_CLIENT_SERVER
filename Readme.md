@@ -127,9 +127,9 @@ Type `quit` to exit. Without an `OPENCODE_API_KEY`, the client connects, prints 
 
 ## Model and quotas
 
-The client talks to OpenCode's OpenAI-compatible endpoint (`https://opencode.ai/inference/openai/v1`) and uses `deepseek-v4.1-flash` by default. Set `OPENCODE_MODEL` in `.env` to use another chat-completions model, e.g. `kimi-k2.6` or `glm-5.3`, and `OPENCODE_BASE_URL` to change the endpoint.
+The client talks to OpenCode's OpenAI-compatible endpoint (`https://opencode.ai/inference/go/openai/v1`, for an OpenCode Go subscription) and uses `deepseek-v4.1-flash` by default. Set `OPENCODE_MODEL` in `.env` to use another chat-completions model, e.g. `kimi-k3` or `glm-5.3`, and `OPENCODE_BASE_URL` to change the endpoint.
 
-OpenCode's free models only work from the OpenCode app itself, so this client needs a paid model and credit on your OpenCode account. Each question takes 2–3 requests, one per tool round trip.
+Use an API key from a workspace subscribed to OpenCode Go. For pay-as-you-go credit instead, set `OPENCODE_BASE_URL=https://opencode.ai/inference/openai/v1`. Free models only work from the OpenCode app itself. Each question takes 2–3 requests, one per tool round trip.
 
 ## How the client works
 

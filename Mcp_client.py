@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import sys
+import uuid
 from contextlib import AsyncExitStack
 from pathlib import Path
 
@@ -13,8 +14,9 @@ from mcp_types import TextContent
 
 load_dotenv()  # load environment variables from .env
 
-# OpenCode's OpenAI-compatible endpoint. Use a model served over chat completions.
-OPENCODE_BASE_URL = os.getenv("OPENCODE_BASE_URL", "https://opencode.ai/inference/openai/v1")
+# OpenCode Go's OpenAI-compatible endpoint. For pay-as-you-go (Zen) credit instead,
+# set OPENCODE_BASE_URL=https://opencode.ai/inference/openai/v1 in .env.
+OPENCODE_BASE_URL = os.getenv("OPENCODE_BASE_URL", "https://opencode.ai/inference/go/openai/v1")
 OPENCODE_MODEL = os.getenv("OPENCODE_MODEL", "deepseek-v4.1-flash")
 MAX_TOOL_TURNS = 10
 # Fail a stuck request instead of hanging the chat loop.
@@ -63,6 +65,7 @@ class MCPClient:
         self.client: Client | None = None
         self.exit_stack = AsyncExitStack()
         self._llm: AsyncOpenAI | None = None
+        self._session_id = f"ses_{uuid.uuid4().hex}"
 
     @property
     def llm(self) -> AsyncOpenAI:
@@ -74,6 +77,12 @@ class MCPClient:
                 timeout=REQUEST_TIMEOUT_S,
                 # The SDK backs off and retries on 429 and 5xx responses.
                 max_retries=4,
+                default_headers={
+                    # OpenCode Go requires a stable session id per conversation,
+                    # and asks clients to identify themselves.
+                    "x-opencode-session": self._session_id,
+                    "User-Agent": "mauritius-news-mcp-client/0.1",
+                },
             )
         return self._llm
 
