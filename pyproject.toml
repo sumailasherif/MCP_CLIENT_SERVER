@@ -1,17 +1,18 @@
 [project]
 name = "mcp-client"
 version = "0.1.0"
-description = "Mauritian news archive with an MCP server, a REST API and a Gemini-powered chat client"
+description = "Mauritian news archive with an MCP server, a REST API and an OpenCode-powered chat client"
 readme = "Readme.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.151.0",
-    "google-genai>=2.31.0",
     # news_store.py fetches the RSS feeds with httpx2.
     "httpx2>=2.15.1",
     "mcp>=2.3.0",
     # client.py imports TextContent from mcp_types, which `mcp` pins exactly.
     "mcp-types>=2.2.0",
+    # OpenCode exposes an OpenAI-compatible chat completions API.
+    "openai>=1.80.0",
     "python-dotenv>=1.2.4",
     "uvicorn>=0.54.0",
 ]

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -6,17 +7,18 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import errors, types
+from openai import APIError, AsyncOpenAI, RateLimitError
 from mcp import Client, StdioServerParameters
 from mcp_types import TextContent
 
 load_dotenv()  # load environment variables from .env
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+# OpenCode's OpenAI-compatible endpoint. Use a model served over chat completions.
+OPENCODE_BASE_URL = os.getenv("OPENCODE_BASE_URL", "https://opencode.ai/inference/openai/v1")
+OPENCODE_MODEL = os.getenv("OPENCODE_MODEL", "deepseek-v4.1-flash")
 MAX_TOOL_TURNS = 10
 # Fail a stuck request instead of hanging the chat loop.
-REQUEST_TIMEOUT_MS = 60_000
+REQUEST_TIMEOUT_S = 60.0
 
 # Much of the Mauritian press publishes in French; answers are always in English.
 SYSTEM_INSTRUCTION = """\
@@ -46,7 +48,7 @@ def is_destructive(tool) -> bool:
 
 async def confirm(tool_name: str, args: dict) -> bool:
     """Ask the user to approve a destructive tool call. Anything but "y" is a no."""
-    prompt = f"\n⚠️  Gemini wants to run {tool_name} with {args}. Proceed? [y/N] "
+    prompt = f"\n⚠️  The model wants to run {tool_name} with {args}. Proceed? [y/N] "
     # input() blocks, so keep it off the event loop.
     try:
         answer = await asyncio.to_thread(input, prompt)
@@ -60,25 +62,24 @@ class MCPClient:
         # Initialize session and client objects
         self.client: Client | None = None
         self.exit_stack = AsyncExitStack()
-        self._gemini: genai.Client | None = None
+        self._llm: AsyncOpenAI | None = None
 
     @property
-    def gemini(self) -> genai.Client:
-        """Lazy-initialize Gemini client when needed"""
-        if self._gemini is None:
-            self._gemini = genai.Client(
-                api_key=os.getenv("GEMINI_API_KEY"),
-                http_options=types.HttpOptions(
-                    timeout=REQUEST_TIMEOUT_MS,
-                    # Free-tier keys often get 429/503 under load; back off and retry.
-                    retry_options=types.HttpRetryOptions(attempts=4, http_status_codes=[429, 500, 503, 504]),
-                ),
+    def llm(self) -> AsyncOpenAI:
+        """Lazy-initialize the OpenCode client when needed"""
+        if self._llm is None:
+            self._llm = AsyncOpenAI(
+                api_key=os.getenv("OPENCODE_API_KEY"),
+                base_url=OPENCODE_BASE_URL,
+                timeout=REQUEST_TIMEOUT_S,
+                # The SDK backs off and retries on 429 and 5xx responses.
+                max_retries=4,
             )
-        return self._gemini
+        return self._llm
 
-    async def _generate(self, contents: list[types.Content], config: types.GenerateContentConfig):
-        """Send one turn to Gemini"""
-        return await self.gemini.aio.models.generate_content(model=GEMINI_MODEL, contents=contents, config=config)
+    async def _generate(self, messages: list[dict], tools: list[dict]):
+        """Send one turn to OpenCode"""
+        return await self.llm.chat.completions.create(model=OPENCODE_MODEL, messages=messages, tools=tools)
 
     async def connect_to_server(self, server_script_path: str):
         """Connect to an MCP server
@@ -112,102 +113,92 @@ class MCPClient:
         print(f"\nConnected over protocol {self.client.protocol_version} with tools:", [tool.name for tool in tools])
 
     async def process_query(self, query: str) -> str:
-        """Process a query using Gemini and available tools"""
-        contents = [types.Content(role="user", parts=[types.Part(text=query)])]
+        """Process a query using OpenCode and available tools"""
+        messages: list[dict] = [
+            {"role": "system", "content": SYSTEM_INSTRUCTION},
+            {"role": "user", "content": query},
+        ]
 
-        # MCP input schemas are JSON Schema, which Gemini accepts as-is.
+        # MCP input schemas are JSON Schema, which OpenAI-style function tools accept as-is.
         tools_response = await self.client.list_tools()
-        config = types.GenerateContentConfig(
-            tools=[
-                types.Tool(
-                    function_declarations=[
-                        types.FunctionDeclaration(
-                            name=tool.name, description=tool.description, parameters_json_schema=tool.input_schema
-                        )
-                        for tool in tools_response.tools
-                    ]
-                )
-            ],
-            # This loop calls the MCP tools itself, so turn off the SDK's own
-            # automatic function calling.
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            system_instruction=SYSTEM_INSTRUCTION,
-        )
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "parameters": tool.input_schema,
+                },
+            }
+            for tool in tools_response.tools
+        ]
 
         # Destructive tools only run after the user says yes.
         needs_confirmation = {tool.name for tool in tools_response.tools if is_destructive(tool)}
 
         final_text = []
 
-        response = await self._generate(contents, config)
+        response = await self._generate(messages, tools)
 
         for _ in range(MAX_TOOL_TURNS):
-            # No candidate means the prompt itself was blocked.
-            candidate = response.candidates[0] if response.candidates else None
-            if candidate is None or candidate.content is None:
-                final_text.append(f"[Gemini returned no answer: {response.prompt_feedback or 'empty response'}]")
+            choice = response.choices[0] if response.choices else None
+            if choice is None:
+                final_text.append("[OpenCode returned no answer: empty response]")
                 return "\n".join(final_text)
 
-            model_turn = candidate.content
-            function_calls = []
-            for part in model_turn.parts or []:
-                # Skip thought summaries; keep only the answer text.
-                if part.text and not part.thought:
-                    final_text.append(part.text)
-                elif part.function_call:
-                    function_calls.append(part.function_call)
+            message = choice.message
+            if message.content:
+                final_text.append(message.content)
 
-            if not function_calls:
-                if candidate.finish_reason not in (None, types.FinishReason.STOP):
-                    final_text.append(f"[Gemini stopped: {candidate.finish_reason.name}]")
+            if not message.tool_calls:
+                if choice.finish_reason not in (None, "stop"):
+                    final_text.append(f"[OpenCode stopped: {choice.finish_reason}]")
                 return "\n".join(final_text)
 
-            function_responses = []
-            for call in function_calls:
-                args = call.args or {}
-                if call.name in needs_confirmation and not await confirm(call.name, args):
-                    final_text.append(f"[Skipped {call.name}: you declined]")
-                    function_responses.append(
-                        types.Part(
-                            function_response=types.FunctionResponse(
-                                id=call.id, name=call.name, response={"error": "The user declined this action."}
-                            )
-                        )
+            # Send the assistant turn back unchanged (including any reasoning
+            # fields the provider added) so the model keeps its context.
+            messages.append(message.model_dump(exclude_none=True))
+
+            for call in message.tool_calls:
+                name = call.function.name
+                try:
+                    args = json.loads(call.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    messages.append(
+                        {"role": "tool", "tool_call_id": call.id, "content": "Error: arguments were not valid JSON."}
+                    )
+                    continue
+
+                if name in needs_confirmation and not await confirm(name, args):
+                    final_text.append(f"[Skipped {name}: you declined]")
+                    messages.append(
+                        {"role": "tool", "tool_call_id": call.id, "content": "Error: The user declined this action."}
                     )
                     continue
 
                 # call_tool validates the result against the declared schema.
-                result = await self.client.call_tool(call.name, args)
-                final_text.append(f"[Calling tool {call.name} with args {args}]")
+                result = await self.client.call_tool(name, args)
+                final_text.append(f"[Calling tool {name} with args {args}]")
 
                 # structured_content is data the application can use directly.
                 if isinstance(result.structured_content, list):
-                    final_text.append(f"[{call.name} returned {len(result.structured_content)} items]")
+                    final_text.append(f"[{name} returned {len(result.structured_content)} items]")
 
                 # content is a list of block types; forward only the text ones.
                 text = "\n".join(block.text for block in result.content if isinstance(block, TextContent))
-                function_responses.append(
-                    types.Part(
-                        function_response=types.FunctionResponse(
-                            id=call.id,
-                            name=call.name,
-                            response={"error": text} if result.is_error else {"result": text},
-                        )
-                    )
+                messages.append(
+                    {"role": "tool", "tool_call_id": call.id, "content": f"Error: {text}" if result.is_error else text}
                 )
 
-            # Send the model's turn back unchanged so its thought signatures are kept.
-            contents.append(model_turn)
-            contents.append(types.Content(role="user", parts=function_responses))
-
-            response = await self._generate(contents, config)
+            response = await self._generate(messages, tools)
 
         # The turn cap was hit. Keep the last response's text. If it asked for
         # more tools, say they were not run.
-        if response.candidates and response.candidates[0].content:
-            parts = response.candidates[0].content.parts or []
-            final_text.extend(part.text for part in parts if part.text and not part.thought)
-            if any(part.function_call for part in parts):
+        if response.choices:
+            message = response.choices[0].message
+            if message.content:
+                final_text.append(message.content)
+            if message.tool_calls:
                 final_text.append(f"[Stopped after {MAX_TOOL_TURNS} tool-use turns]")
         return "\n".join(final_text)
 
@@ -229,14 +220,13 @@ class MCPClient:
             try:
                 response = await self.process_query(query)
                 print("\n" + response)
-            except errors.ClientError as e:
-                if e.code == 429:
-                    print(
-                        f"\nGemini quota reached for {GEMINI_MODEL}. Free-tier quotas are per model, so you can set "
-                        "GEMINI_MODEL in .env to another model, or wait for the quota to reset."
-                    )
-                else:
-                    print(f"\nError: {str(e)}")
+            except RateLimitError:
+                print(
+                    f"\nOpenCode rate limit or credit limit reached for {OPENCODE_MODEL}. Check your balance in the "
+                    "OpenCode Console, set OPENCODE_MODEL in .env to another model, or try again later."
+                )
+            except APIError as e:
+                print(f"\nOpenCode API error: {e}")
             except Exception as e:
                 print(f"\nError: {str(e)}")
 
@@ -255,11 +245,11 @@ async def main():
         await client.connect_to_server(sys.argv[1])
 
         # Check if we have a valid API key to continue
-        api_key = os.getenv("GEMINI_API_KEY")
+        api_key = os.getenv("OPENCODE_API_KEY")
         if not api_key:
-            print("\nNo GEMINI_API_KEY found. To query these tools with Gemini, set your API key in .env:")
-            print("  GEMINI_API_KEY=your-api-key-here")
-            print("Get a free key at https://aistudio.google.com/apikey")
+            print("\nNo OPENCODE_API_KEY found. To query these tools with OpenCode, set your API key in .env:")
+            print("  OPENCODE_API_KEY=your-api-key-here")
+            print("Get a key from the OpenCode Console: https://opencode.ai/zen")
             return
 
         await client.chat_loop()

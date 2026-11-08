@@ -8,7 +8,7 @@ Ask questions about Mauritian news in plain English, or query the news archive o
 | `schema.sql` | The database schema: articles, full-text index, your notes, refresh log |
 | `news_server.py` | MCP server: exposes the archive and your notes as tools for an AI model |
 | `api.py` | REST API (FastAPI): exposes the archive as JSON routes |
-| `Mcp_client.py` | Chat client: launches the MCP server, hands its tools to Google Gemini, and answers your questions. Answers are always in English: French headlines and articles are translated, with the original French headline kept in parentheses |
+| `Mcp_client.py` | Chat client: launches the MCP server, hands its tools to a model served by OpenCode, and answers your questions. Answers are always in English: French headlines and articles are translated, with the original French headline kept in parentheses |
 
 ## Sources
 
@@ -38,9 +38,9 @@ Only outlets with public RSS feeds that their `robots.txt` allows are included. 
 
 ## Notes from the chat (CRUD)
 
-Besides the news, the database holds your own notes in a separate `notes` table, so feed refreshes never touch them. Manage them by talking to Gemini:
+Besides the news, the database holds your own notes in a separate `notes` table, so feed refreshes never touch them. Manage them by talking to the model:
 
-- "Save article 117 with the note 'use in my report', tagged report and politics" → `create_note`
+- "Save the latest 4minit newsletter with the note 'use in my report', tagged report and politics" → `create_note`
 - "Show my notes tagged report" → `list_notes`
 - "Add the tag curfew to note 4" → `update_note`
 - "Delete note 4" → `delete_note`
@@ -48,10 +48,10 @@ Besides the news, the database holds your own notes in a separate `notes` table,
 Creates and edits run straight away. **Deletes always ask first:**
 
 ```text
-⚠️  Gemini wants to run delete_note with {'note_id': 4}. Proceed? [y/N]
+⚠️  The model wants to run delete_note with {'note_id': 4}. Proceed? [y/N]
 ```
 
-Anything but `y` cancels, and Gemini is told you declined. The client decides which tools need this from the tools' MCP annotations (`destructive_hint`), not from their names, so it also protects you when connected to other MCP servers. A tool without annotations is treated as destructive, as the MCP spec says.
+Anything but `y` cancels, and the model is told you declined. The client decides which tools need this from the tools' MCP annotations (`destructive_hint`), not from their names, so it also protects you when connected to other MCP servers. A tool without annotations is treated as destructive, as the MCP spec says.
 
 ## REST API
 
@@ -101,12 +101,12 @@ To browse the database directly, open `news.db` in [DB Browser for SQLite](https
 ## Setup
 
 - Python 3.11+
-- A [Gemini API key](https://aistudio.google.com/apikey) (the free tier works)
+- An [OpenCode API key](https://opencode.ai/zen) (from the OpenCode Console, with credit for a paid model)
 
 ```bash
 python -m pip install uv
 python -m uv sync
-copy .env.example .env      # then put your GEMINI_API_KEY in .env
+copy .env.example .env      # then put your OPENCODE_API_KEY in .env
 ```
 
 ## Run
@@ -121,18 +121,18 @@ Try:
 
 - "What are the latest headlines in Mauritius?"
 - "What has been reported about the riots this week?"
-- "Translate article 95 into English."
+- "Translate the latest ION News article into English."
 
-Type `quit` to exit. Without a `GEMINI_API_KEY`, the client connects, prints the server's tools, and exits, which is useful for checking the MCP wiring.
+Type `quit` to exit. Without an `OPENCODE_API_KEY`, the client connects, prints the server's tools, and exits, which is useful for checking the MCP wiring.
 
 ## Model and quotas
 
-The client uses `gemini-3.6-flash` by default. Set `GEMINI_MODEL` in `.env` to use another model.
+The client talks to OpenCode's OpenAI-compatible endpoint (`https://opencode.ai/inference/openai/v1`) and uses `deepseek-v4.1-flash` by default. Set `OPENCODE_MODEL` in `.env` to use another chat-completions model, e.g. `kimi-k2.6` or `glm-5.3`, and `OPENCODE_BASE_URL` to change the endpoint.
 
-The Gemini free tier allows a limited number of requests per model per day (20 for `gemini-3.6-flash` when this was written). Each question takes 2–3 requests, one per tool round trip. Quotas are per model, so if one runs out you can switch `GEMINI_MODEL` to another, e.g. `gemini-3.5-flash` or `gemini-3-flash-preview`.
+OpenCode's free models only work from the OpenCode app itself, so this client needs a paid model and credit on your OpenCode account. Each question takes 2–3 requests, one per tool round trip.
 
 ## How the client works
 
-MCP tool input schemas are passed to Gemini unchanged as JSON Schema (`parameters_json_schema`). The SDK's automatic function calling is turned off, because the client runs the tool loop itself and calls the tools over MCP. The model's turns are sent back unchanged so Gemini's thought signatures are kept.
+MCP tool input schemas are passed to the model unchanged as JSON Schema, as OpenAI-style function tools. The client runs the tool loop itself, calling the tools over MCP and returning each result as a `tool` message. The model's turns are sent back unchanged so any reasoning fields the provider adds are kept.
 
 `Client(server_params, mode="auto")` launches the server from its `StdioServerParameters`, then probes `server/discover` and falls back to the `2025-11-25` handshake; `client.protocol_version` reports which era you got. See [Protocol versions](https://py.sdk.modelcontextprotocol.io/v2/protocol-versions/).
